@@ -5,15 +5,30 @@ import { useMemo, useState } from 'react';
 import { TRAFFIC_SOURCES } from '../core/schema.js';
 import { buildDiagnosisPrompt, findPatterns } from '../core/aiCoachEngine.js';
 
-const inputCls =
-  'w-full rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100 focus:outline-none focus:ring-2 focus:ring-violet-500';
+const isNum = (v) => typeof v === 'number' && Number.isFinite(v);
+const r1 = (n) => Math.round(n * 10) / 10;
+
+// Compares one metric with the channel average. Needs 2+ uploaded episodes with data to have a baseline.
+// Within 10% of the average counts as on par; the badge always says it in words, not only in color.
+const compare = (value, avg, sampleSize, unit) => {
+  if (!isNum(value)) return { cls: 'stat-none', text: 'No data yet', delta: '' };
+  if (!isNum(avg) || sampleSize < 2) return { cls: 'stat-none', text: 'No baseline yet', delta: '' };
+  const diff = value - avg;
+  const rel = avg > 0 ? diff / avg : 0;
+  const delta = `${diff >= 0 ? '+' : ''}${r1(diff)}${unit} vs channel average`;
+  if (rel >= 0.1) return { cls: 'stat-good', text: 'Strong', delta };
+  if (rel <= -0.1) return { cls: 'stat-low', text: 'Below average', delta };
+  return { cls: 'stat-mid', text: 'On par', delta };
+};
+
+const mmss = (sec) => (isNum(sec) ? `${Math.floor(sec / 60)}:${String(Math.round(sec % 60)).padStart(2, '0')}` : '—');
 
 function Field({ label, hint, children }) {
   return (
-    <label className="block">
-      <span className="mb-1 block text-sm font-medium text-slate-300">
+    <label className="field">
+      <span className="field-label">
         {label}
-        {hint && <span className="font-normal text-slate-500"> {hint}</span>}
+        {hint && <span className="field-hint"> {hint}</span>}
       </span>
       {children}
     </label>
@@ -29,7 +44,7 @@ function NumberField({ label, hint, value, onChange, max, step = 1 }) {
         min="0"
         max={max}
         step={step}
-        className={inputCls}
+        className="input num"
         value={value ?? ''}
         onChange={(e) => onChange(e.target.value === '' ? null : Number(e.target.value))}
       />
@@ -42,7 +57,7 @@ function TextAreaField({ label, hint, value, onChange, placeholder }) {
     <Field label={label} hint={hint}>
       <textarea
         rows={3}
-        className={inputCls}
+        className="input"
         value={value ?? ''}
         placeholder={placeholder}
         onChange={(e) => onChange(e.target.value)}
@@ -61,19 +76,47 @@ function TagsField({ label, value, onCommit }) {
   };
   return (
     <Field label={label} hint="(comma-separated)">
-      <input className={inputCls} value={text} onChange={(e) => setText(e.target.value)} onBlur={commit} />
+      <input className="input" value={text} onChange={(e) => setText(e.target.value)} onBlur={commit} />
     </Field>
   );
 }
 
-function Bucket({ title, subtitle, children }) {
+// Headline number for a bucket, with an optional status badge and small secondary readouts.
+function Kpi({ label, value, unit, badge, stats = [] }) {
   return (
-    <section className="space-y-4 rounded-lg border border-slate-800 bg-slate-900 p-5">
-      <div>
-        <h3 className="text-lg font-semibold text-slate-100">{title}</h3>
-        <p className="text-sm text-slate-500">{subtitle}</p>
+    <div className="kpi">
+      <div className="kpi-top">
+        <span className="kpi-label">{label}</span>
+        {badge && <span className={`stat-badge ${badge.cls}`}>{badge.text}</span>}
       </div>
-      {children}
+      <p className="kpi-value num">
+        {isNum(value) ? value : '—'}
+        {isNum(value) && unit && <small>{unit}</small>}
+      </p>
+      {badge?.delta && <p className="kpi-delta num">{badge.delta}</p>}
+      {stats.length > 0 && (
+        <dl className="kpi-stats">
+          {stats.map(([name, v]) => (
+            <div key={name}>
+              <dt>{name}</dt>
+              <dd className="num">{v}</dd>
+            </div>
+          ))}
+        </dl>
+      )}
+    </div>
+  );
+}
+
+function Bucket({ title, subtitle, kpi, children }) {
+  return (
+    <section className="panel bucket">
+      <div className="bucket-head">
+        <h3 className="panel-title">{title}</h3>
+        <p className="bucket-sub">{subtitle}</p>
+      </div>
+      {kpi}
+      <div className="form-stack">{children}</div>
     </section>
   );
 }
@@ -103,15 +146,63 @@ export default function AnalyticsPanel({ episode, episodes, onChange }) {
     setTimeout(() => setCopyMsg(''), 3000);
   };
 
+  const ctrBadge = compare(d.ctr, patterns.overall.ctr, patterns.sampleSize, '%');
+  const ret30Badge = compare(rt.retention30s, patterns.overall.retention30s, patterns.sampleSize, '%');
+
   return (
-    <div className="space-y-6">
-      <section className="space-y-4 rounded-lg border border-slate-800 bg-slate-900 p-5">
-        <h3 className="text-lg font-semibold text-slate-100">Episode tags for pattern analysis</h3>
-        <div className="grid gap-4 md:grid-cols-2">
+    <div className="col" style={{ gap: '1.5rem' }}>
+      <section className="panel insights">
+        <div className="insights-head">
+          <div>
+            <h3 className="panel-title">AI Pattern Insights</h3>
+            <p className="panel-note">
+              Built from <span className="num">{patterns.sampleSize}</span> uploaded episode{patterns.sampleSize === 1 ? '' : 's'} with
+              analytics.
+            </p>
+          </div>
+          <div className="row">
+            {copyMsg && (
+              <span role="status" className="msg">
+                {copyMsg}
+              </span>
+            )}
+            <button onClick={copyDiagnosis} className="btn btn-primary">
+              Copy Diagnosis Prompt
+            </button>
+          </div>
+        </div>
+
+        {patterns.sampleSize >= 2 && patterns.lowConfidence && (
+          <p className="notice-amber">
+            Small sample (<span className="num">{patterns.sampleSize}</span> episodes): treat these as hints, not proof.
+          </p>
+        )}
+        <ul className="tips">
+          {patterns.insights.map((text) => (
+            <li key={text}>{text}</li>
+          ))}
+        </ul>
+        {patterns.topRequests.length > 0 && (
+          <div className="chip-group">
+            <span className="chip-group-label">Most requested by viewers</span>
+            <div className="chips">
+              {patterns.topRequests.map((q) => (
+                <span key={q.text} className="chip chip-miss">
+                  {q.text} <span className="num">x{q.count}</span>
+                </span>
+              ))}
+            </div>
+          </div>
+        )}
+      </section>
+
+      <section className="panel">
+        <h3 className="panel-title">Episode tags for pattern analysis</h3>
+        <div className="form-grid-2">
           <Field label="Mood" hint="(e.g. Yandere, Stern, Soft Comfort)">
             <input
               list="mood-options"
-              className={inputCls}
+              className="input"
               value={episode.mood ?? ''}
               onChange={(e) => onChange({ ...episode, mood: e.target.value })}
             />
@@ -124,7 +215,7 @@ export default function AnalyticsPanel({ episode, episodes, onChange }) {
           <Field label="Hook style" hint="(e.g. Accusation / open loop)">
             <input
               list="hook-options"
-              className={inputCls}
+              className="input"
               value={episode.hookStyle ?? ''}
               onChange={(e) => onChange({ ...episode, hookStyle: e.target.value })}
             />
@@ -135,7 +226,7 @@ export default function AnalyticsPanel({ episode, episodes, onChange }) {
             </datalist>
           </Field>
         </div>
-        <label className="flex items-center gap-2 text-sm text-slate-300">
+        <label className="check">
           <input
             type="checkbox"
             checked={!!episode.uploaded}
@@ -145,13 +236,28 @@ export default function AnalyticsPanel({ episode, episodes, onChange }) {
         </label>
       </section>
 
-      <div className="grid gap-6 lg:grid-cols-3">
-        <Bucket title="Discovery" subtitle="Did people click?">
+      <div className="bento">
+        <Bucket
+          title="Discovery"
+          subtitle="Did people click?"
+          kpi={
+            <Kpi
+              label="CTR"
+              value={d.ctr}
+              unit="%"
+              badge={ctrBadge}
+              stats={[
+                ['Impressions', isNum(d.impressions) ? d.impressions.toLocaleString() : '—'],
+                ['Top source', d.trafficSource || '—'],
+              ]}
+            />
+          }
+        >
           <NumberField label="Impressions" value={d.impressions} onChange={(v) => setBucket('discovery', 'impressions', v)} />
           <NumberField label="CTR" hint="(%)" max={100} step={0.1} value={d.ctr} onChange={(v) => setBucket('discovery', 'ctr', v)} />
           <Field label="Primary traffic source">
             <select
-              className={inputCls}
+              className="input"
               value={d.trafficSource ?? ''}
               onChange={(e) => setBucket('discovery', 'trafficSource', e.target.value)}
             >
@@ -165,7 +271,22 @@ export default function AnalyticsPanel({ episode, episodes, onChange }) {
           </Field>
         </Bucket>
 
-        <Bucket title="Retention" subtitle="Did they stay?">
+        <Bucket
+          title="Retention"
+          subtitle="Did they stay?"
+          kpi={
+            <Kpi
+              label="30-sec retention"
+              value={rt.retention30s}
+              unit="%"
+              badge={ret30Badge}
+              stats={[
+                ['Avg view duration', mmss(rt.avdSeconds)],
+                ['Avg % viewed', isNum(rt.avgPercentViewed) ? `${rt.avgPercentViewed}%` : '—'],
+              ]}
+            />
+          }
+        >
           <NumberField label="30-sec retention" hint="(%)" max={100} step={0.1} value={rt.retention30s} onChange={(v) => setBucket('retention', 'retention30s', v)} />
           <NumberField label="Average view duration" hint="(seconds)" value={rt.avdSeconds} onChange={(v) => setBucket('retention', 'avdSeconds', v)} />
           <NumberField label="Average percentage viewed" hint="(%)" max={100} step={0.1} value={rt.avgPercentViewed} onChange={(v) => setBucket('retention', 'avgPercentViewed', v)} />
@@ -179,8 +300,21 @@ export default function AnalyticsPanel({ episode, episodes, onChange }) {
           />
         </Bucket>
 
-        <Bucket title="Audience & Trends" subtitle="What did they say?">
-          <div className="grid grid-cols-2 gap-4">
+        <Bucket
+          title="Audience & Trends"
+          subtitle="What did they say?"
+          kpi={
+            <Kpi
+              label="Likes"
+              value={au.likes}
+              stats={[
+                ['Comments', isNum(au.comments) ? au.comments.toLocaleString() : '—'],
+                ['Returning viewers', isNum(rt.returningViewers) ? `${rt.returningViewers}%` : '—'],
+              ]}
+            />
+          }
+        >
+          <div className="form-grid-2">
             <NumberField label="Likes" value={au.likes} onChange={(v) => setBucket('audience', 'likes', v)} />
             <NumberField label="Comments" value={au.comments} onChange={(v) => setBucket('audience', 'comments', v)} />
           </div>
@@ -195,42 +329,6 @@ export default function AnalyticsPanel({ episode, episodes, onChange }) {
           <TagsField key={episode.id} label="Trend tags" value={au.trendTags} onCommit={(tags) => setBucket('audience', 'trendTags', tags)} />
         </Bucket>
       </div>
-
-      <section className="space-y-3 rounded-lg border border-violet-900 bg-slate-900 p-5">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <h3 className="text-lg font-semibold text-slate-100">AI Pattern Insights</h3>
-          <div className="flex items-center gap-3">
-            {copyMsg && (
-              <span role="status" className="text-sm text-slate-300">
-                {copyMsg}
-              </span>
-            )}
-            <button
-              onClick={copyDiagnosis}
-              className="rounded-md bg-violet-500 px-4 py-2 font-semibold text-white hover:bg-violet-400 focus:outline-none focus:ring-2 focus:ring-violet-300"
-            >
-              Copy Diagnosis Prompt
-            </button>
-          </div>
-        </div>
-
-        {patterns.sampleSize >= 2 && patterns.lowConfidence && (
-          <p className="text-sm text-amber-300">
-            Small sample ({patterns.sampleSize} episodes): treat these as hints, not proof.
-          </p>
-        )}
-        <ul className="list-disc space-y-1 pl-5 text-slate-300">
-          {patterns.insights.map((text) => (
-            <li key={text}>{text}</li>
-          ))}
-        </ul>
-        {patterns.topRequests.length > 0 && (
-          <p className="text-sm text-slate-400">
-            Most requested by viewers:{' '}
-            {patterns.topRequests.map((q) => `${q.text} (x${q.count})`).join(', ')}
-          </p>
-        )}
-      </section>
     </div>
   );
 }

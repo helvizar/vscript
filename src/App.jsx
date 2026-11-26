@@ -17,21 +17,33 @@ import { buildScriptCoachPrompt, buildTitleSeoPrompt, coachEpisode } from './cor
 import AnalyticsPanel from './components/AnalyticsPanel.jsx';
 import TeleprompterModal from './components/TeleprompterModal.jsx';
 
-const inputCls =
-  'w-full rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100 focus:outline-none focus:ring-2 focus:ring-violet-500';
-const btnCls =
-  'rounded-md px-3 py-2 text-sm font-semibold focus:outline-none focus:ring-2 focus:ring-violet-400 disabled:cursor-not-allowed disabled:opacity-40';
-const ZONE_BAR = { under: 'bg-rose-500', compact: 'bg-amber-400', sweet: 'bg-emerald-500' };
+// Zone ids map to CSS classes (zone-under, zone-compact, zone-sweet) that set the zone color tokens.
+const ZONE_BAR = { under: 'zone-under', compact: 'zone-compact', sweet: 'zone-sweet' };
+const ZONE_NAME = { under: 'Under target', compact: 'Compact', sweet: 'Sweet spot' };
 const STATUS = {
-  saved: ['Auto-Saved', 'text-emerald-400'],
-  saving: ['Saving…', 'text-amber-300'],
-  error: ['Save failed: storage full or blocked', 'text-rose-400'],
+  saved: ['Auto-Saved', 'status-saved'],
+  saving: ['Saving…', 'status-saving'],
+  error: ['Save failed: storage full or blocked', 'status-error'],
 };
 const TABS = [
   ['packaging', 'Packaging & SEO'],
   ['script', '5-Act Script & Pacing'],
   ['analytics', 'Analytics'],
 ];
+const FILTERS = [
+  ['all', 'All'],
+  ['draft', 'Drafts'],
+  ['uploaded', 'Uploaded'],
+];
+
+// The three default registers get fixed colors; custom ones cycle through the same three by position.
+const TONES = ['sky', 'rose', 'violet'];
+const KNOWN_TONE = { bright: 'sky', deep: 'rose', calm: 'violet' };
+const toneOf = (registers, id) => {
+  if (KNOWN_TONE[id]) return KNOWN_TONE[id];
+  const i = registers.findIndex((r) => r.id === id);
+  return i < 0 ? 'none' : TONES[i % TONES.length];
+};
 
 const byNewest = (a, b) => b.createdAt - a.createdAt;
 const slug = (s) => s.replace(/\[[^\]]*\]/g, '').replace(/[^a-z0-9]+/gi, '-').replace(/^-|-$/g, '').slice(0, 60) || 'episode';
@@ -59,12 +71,45 @@ function useCopy() {
   return [msg, copy];
 }
 
+// ---------- small shared pieces ----------
+
+const ICONS = {
+  plus: 'M12 5v14M5 12h14',
+  copy: 'M9 9h11v11H9zM5 15H4V4h11v1',
+  trash: 'M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3',
+  download: 'M12 4v11m0 0l-4-4m4 4l4-4M5 20h14',
+  upload: 'M12 15V4m0 0L8 8m4-4l4 4M5 20h14',
+  search: 'M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14zM20 20l-4-4',
+  panel: 'M4 5h16v14H4zM9 5v14',
+  warn: 'M12 4l9 16H3zM12 10v4M12 17v.01',
+  mic: 'M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3zM6 11a6 6 0 0 0 12 0M12 17v4',
+};
+
+function Icon({ name, size = 16 }) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.75"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      focusable="false"
+    >
+      <path d={ICONS[name]} />
+    </svg>
+  );
+}
+
 function Field({ label, hint, children }) {
   return (
-    <label className="block">
-      <span className="mb-1 block text-sm font-medium text-slate-300">
+    <label className="field">
+      <span className="field-label">
         {label}
-        {hint && <span className="font-normal text-slate-500"> {hint}</span>}
+        {hint && <span className="field-hint"> {hint}</span>}
       </span>
       {children}
     </label>
@@ -81,8 +126,27 @@ function TagsField({ value, onCommit }) {
   };
   return (
     <Field label="Tags" hint="(comma-separated)">
-      <input className={inputCls} value={text} onChange={(e) => setText(e.target.value)} onBlur={commit} />
+      <input className="input" value={text} onChange={(e) => setText(e.target.value)} onBlur={commit} />
     </Field>
+  );
+}
+
+// 20-cell LED meter; the zone class picks the lit color.
+function Meter({ value, label, zoneClass }) {
+  const lit = Math.round(value / 5);
+  return (
+    <div
+      className={`meter ${zoneClass}`}
+      role="meter"
+      aria-label={label}
+      aria-valuemin={0}
+      aria-valuemax={100}
+      aria-valuenow={value}
+    >
+      {Array.from({ length: 20 }, (_, i) => (
+        <span key={i} className={i < lit ? 'is-lit' : ''} />
+      ))}
+    </div>
   );
 }
 
@@ -90,78 +154,160 @@ function TagsField({ value, onCommit }) {
 
 function LibrarySidebar({ episodes, selectedId, status, notice, onSelect, onNew, onDuplicate, onDelete, onExport, onImportFile }) {
   const fileRef = useRef(null);
-  const [label, color] = STATUS[status];
+  const [label, statusCls] = STATUS[status];
+  const [collapsed, setCollapsed] = useState(false);
+  const [query, setQuery] = useState('');
+  const [filter, setFilter] = useState('all');
+
+  const visible = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    return [...episodes]
+      .sort(byNewest)
+      .filter((e) => (filter === 'uploaded' ? e.uploaded : filter === 'draft' ? !e.uploaded : true))
+      .filter((e) => !q || `${e.title ?? ''} ${e.mood ?? ''}`.toLowerCase().includes(q));
+  }, [episodes, query, filter]);
+
   return (
-    <aside className="flex w-full flex-col gap-4 border-b border-slate-800 bg-slate-900 p-4 md:w-72 md:border-b-0 md:border-r">
-      <div className="flex items-center justify-between">
-        <h1 className="text-xl font-bold text-slate-100">VScript</h1>
-        <span role="status" className={`text-xs font-semibold ${color}`}>
-          {label}
+    <aside className={`sidebar${collapsed ? ' is-collapsed' : ''}`} aria-label="Episode library">
+      <div className="sb-head">
+        <div className="sb-brand">
+          <span className="sb-mark" aria-hidden="true">V</span>
+          <h1 className="sb-name">VScript</h1>
+        </div>
+        <span role="status" className={`save-badge ${statusCls}`}>
+          <span className="sb-status-text">{label}</span>
         </span>
-      </div>
-
-      <div className="flex flex-wrap gap-2">
-        <button onClick={onNew} className={`${btnCls} bg-violet-500 text-white hover:bg-violet-400`}>
-          New episode
-        </button>
-        <button onClick={onDuplicate} disabled={!selectedId} className={`${btnCls} bg-slate-800 text-slate-200`}>
-          Duplicate
-        </button>
-        <button onClick={onDelete} disabled={!selectedId} className={`${btnCls} bg-slate-800 text-rose-300`}>
-          Delete
+        <button
+          className="btn btn-ghost btn-icon"
+          onClick={() => setCollapsed((c) => !c)}
+          aria-expanded={!collapsed}
+          aria-controls="library-body"
+          aria-label={collapsed ? 'Expand library' : 'Collapse library'}
+          title={collapsed ? 'Expand library' : 'Collapse library'}
+        >
+          <Icon name="panel" />
         </button>
       </div>
 
-      <ul className="flex-1 space-y-1 overflow-y-auto" aria-label="Episodes">
-        {[...episodes].sort(byNewest).map((e) => {
-          const total = calcDuration(e).totalSeconds;
-          return (
-            <li key={e.id}>
-              <button
-                onClick={() => onSelect(e.id)}
-                aria-current={e.id === selectedId}
-                className={`w-full rounded-md p-2 text-left text-sm ${
-                  e.id === selectedId ? 'bg-slate-700 text-white' : 'text-slate-300 hover:bg-slate-800'
-                }`}
-              >
-                <span className="line-clamp-2">{e.title || 'Untitled'}</span>
-                <span className="mt-1 flex items-center gap-2 text-xs text-slate-400">
-                  <span className={`h-2 w-2 rounded-full ${ZONE_BAR[evaluateZone(total).id]}`} />
-                  {formatTime(total)}
-                  {e.uploaded && <span className="rounded bg-slate-950 px-1.5">Uploaded</span>}
-                </span>
-              </button>
-            </li>
-          );
-        })}
-      </ul>
+      <div className="sb-rail">
+        <button className="btn btn-primary btn-icon" onClick={onNew} aria-label="New episode" title="New episode">
+          <Icon name="plus" />
+        </button>
+      </div>
 
-      <div className="space-y-2 border-t border-slate-800 pt-3">
-        <div className="flex gap-2">
-          <button onClick={onExport} className={`${btnCls} flex-1 bg-slate-800 text-slate-200`}>
-            Export .json
+      <div id="library-body" className="sb-body">
+        <div className="sb-actions">
+          <button onClick={onNew} className="btn btn-primary">
+            <Icon name="plus" />
+            New episode
           </button>
-          <button onClick={() => fileRef.current?.click()} className={`${btnCls} flex-1 bg-slate-800 text-slate-200`}>
-            Import .json
+          <button onClick={onDuplicate} disabled={!selectedId} className="btn btn-icon" aria-label="Duplicate episode" title="Duplicate episode">
+            <Icon name="copy" />
           </button>
+          <button onClick={onDelete} disabled={!selectedId} className="btn btn-icon" aria-label="Delete episode" title="Delete episode">
+            <Icon name="trash" />
+          </button>
+        </div>
+
+        <div className="sb-search">
+          <Icon name="search" size={15} />
           <input
-            ref={fileRef}
-            type="file"
-            accept=".json,application/json"
-            hidden
-            onChange={(e) => {
-              onImportFile(e.target.files?.[0]);
-              e.target.value = ''; // lets the same file be picked again
-            }}
+            type="search"
+            className="input"
+            placeholder="Search episodes"
+            aria-label="Search episodes"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
           />
         </div>
-        {notice && (
-          <p role="status" className="text-xs text-slate-300">
-            {notice}
-          </p>
-        )}
+
+        <div className="sb-filter">
+          <div role="group" aria-label="Filter episodes" className="seg">
+            {FILTERS.map(([id, name]) => (
+              <button key={id} aria-pressed={filter === id} onClick={() => setFilter(id)}>
+                {name}
+              </button>
+            ))}
+          </div>
+          <span className="sb-count num">
+            {visible.length}/{episodes.length}
+          </span>
+        </div>
+
+        <ul className="ep-list" aria-label="Episodes">
+          {visible.map((e) => {
+            const total = calcDuration(e).totalSeconds;
+            const zone = evaluateZone(total);
+            return (
+              <li key={e.id}>
+                <button onClick={() => onSelect(e.id)} aria-current={e.id === selectedId} className="ep-item">
+                  <span className="ep-title clamp-2">{e.title || 'Untitled'}</span>
+                  <span className="ep-meta">
+                    <span className={`dot ${ZONE_BAR[zone.id]}`} title={zone.label} />
+                    <span className="num">{formatTime(total)}</span>
+                    {e.uploaded && <span className="tag">Uploaded</span>}
+                  </span>
+                </button>
+              </li>
+            );
+          })}
+          {!visible.length && (
+            <li className="ep-empty">{episodes.length ? 'No episodes match. Clear the search or filter.' : 'No episodes yet.'}</li>
+          )}
+        </ul>
+
+        <div className="sb-foot">
+          <p className="sb-foot-title">JSON backup</p>
+          <div className="sb-foot-row">
+            <button onClick={onExport} className="btn">
+              <Icon name="download" />
+              Export .json
+            </button>
+            <button onClick={() => fileRef.current?.click()} className="btn">
+              <Icon name="upload" />
+              Import .json
+            </button>
+            <input
+              ref={fileRef}
+              type="file"
+              accept=".json,application/json"
+              hidden
+              onChange={(e) => {
+                onImportFile(e.target.files?.[0]);
+                e.target.value = ''; // lets the same file be picked again
+              }}
+            />
+          </div>
+          {notice && (
+            <p role="status" className="sb-notice">
+              {notice}
+            </p>
+          )}
+        </div>
       </div>
     </aside>
+  );
+}
+
+// ---------- episode header: always-visible running time ----------
+
+function EpisodeHeader({ episode }) {
+  const { totalSeconds } = useMemo(() => calcDuration(episode), [episode]);
+  const zone = evaluateZone(totalSeconds);
+  return (
+    <header className={`ep-head ${ZONE_BAR[zone.id]}`}>
+      <div className="ep-head-main">
+        <p className="ep-head-title">{episode.title || 'Untitled'}</p>
+        <p className="ep-head-meta">
+          <span>{episode.uploaded ? 'Uploaded' : 'Draft'}</span>
+          {episode.mood && <span>{episode.mood}</span>}
+        </p>
+      </div>
+      <div className="ep-head-time">
+        <span className="ep-time num">{formatTime(totalSeconds)}</span>
+        <span className="zone-badge">{ZONE_NAME[zone.id]}</span>
+      </div>
+    </header>
   );
 }
 
@@ -171,6 +317,7 @@ function PackagingTab({ episode, episodes, onChange }) {
   const { seoScore, tips, alignment } = useMemo(() => coachEpisode(episode), [episode]);
   const [msg, copy] = useCopy();
   const set = (patch) => onChange({ ...episode, ...patch });
+  const seoZone = seoScore >= 80 ? 'zone-sweet' : seoScore >= 50 ? 'zone-compact' : 'zone-under';
 
   const fillChapters = () => {
     if (episode.chapters.trim() && !window.confirm('Replace the current chapters with ones built from the script?')) return;
@@ -183,77 +330,85 @@ function PackagingTab({ episode, episodes, onChange }) {
   };
 
   return (
-    <div className="grid gap-6 lg:grid-cols-2">
-      <div className="space-y-4">
+    <div className="grid-2">
+      <div className="col">
         <Field label="Title" hint="(start with [M4F])">
-          <input className={inputCls} value={episode.title} onChange={(e) => set({ title: e.target.value })} />
+          <input className="input" value={episode.title} onChange={(e) => set({ title: e.target.value })} />
         </Field>
         <Field label="AI thumbnail text" hint="(1-4 words)">
-          <input className={inputCls} value={episode.thumbnailText} onChange={(e) => set({ thumbnailText: e.target.value })} />
+          <input className="input" value={episode.thumbnailText} onChange={(e) => set({ thumbnailText: e.target.value })} />
         </Field>
         <Field label="Description">
-          <textarea rows={6} className={inputCls} value={episode.description} onChange={(e) => set({ description: e.target.value })} />
+          <textarea rows={6} className="input" value={episode.description} onChange={(e) => set({ description: e.target.value })} />
         </Field>
         <TagsField key={episode.id} value={episode.tags} onCommit={(tags) => set({ tags })} />
         <Field label="Chapters" hint="(first at 0:00, at least 3)">
-          <textarea rows={5} className={inputCls} value={episode.chapters} onChange={(e) => set({ chapters: e.target.value })} />
+          <textarea rows={5} className="input num" value={episode.chapters} onChange={(e) => set({ chapters: e.target.value })} />
         </Field>
-        <button onClick={fillChapters} className={`${btnCls} bg-slate-800 text-slate-200`}>
-          Auto-fill chapters from script
-        </button>
+        <div>
+          <button onClick={fillChapters} className="btn">
+            Auto-fill chapters from script
+          </button>
+        </div>
       </div>
 
-      <div className="space-y-4">
-        <section className="space-y-3 rounded-lg border border-slate-800 bg-slate-900 p-5">
-          <h3 className="text-lg font-semibold text-slate-100">Packaging Alignment</h3>
-          <p className="text-3xl font-bold text-slate-100">{alignment.score}/100</p>
-          <p className="text-sm text-slate-400">
+      <div className="col">
+        <section className="panel">
+          <h3 className="panel-title">Packaging Alignment</h3>
+          <p className="big-score num">
+            {alignment.score}
+            <small>/100</small>
+          </p>
+          <p className="panel-note">
             Title and thumbnail keywords the first 20 seconds of Act 1 also say (thumbnail words count double).
           </p>
-          <p className="rounded bg-slate-950 p-3 text-sm italic text-slate-300">
-            {alignment.hook ? `“${alignment.hook}”` : 'Act 1 has no script text yet.'}
-          </p>
-          <div className="flex flex-wrap gap-2 text-sm">
-            {alignment.matched.map((w) => (
-              <span key={w} className="rounded bg-emerald-500/20 px-2 py-0.5 text-emerald-200">
-                {w}
-              </span>
-            ))}
-            {alignment.missing.map((w) => (
-              <span key={w} className="rounded bg-amber-500/20 px-2 py-0.5 text-amber-200">
-                {w}
-              </span>
-            ))}
-          </div>
+          <p className="hook-quote">{alignment.hook ? `“${alignment.hook}”` : 'Act 1 has no script text yet.'}</p>
+          {alignment.matched.length > 0 && (
+            <div className="chip-group">
+              <span className="chip-group-label">Said in the hook</span>
+              <div className="chips">
+                {alignment.matched.map((w) => (
+                  <span key={w} className="chip chip-ok">
+                    {w}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+          {alignment.missing.length > 0 && (
+            <div className="chip-group">
+              <span className="chip-group-label">Not said yet</span>
+              <div className="chips">
+                {alignment.missing.map((w) => (
+                  <span key={w} className="chip chip-miss">
+                    {w}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
         </section>
 
-        <section className="space-y-3 rounded-lg border border-slate-800 bg-slate-900 p-5">
-          <h3 className="text-lg font-semibold text-slate-100">AI Coach</h3>
-          <div className="h-3 rounded bg-slate-800">
-            <div
-              className={`h-full rounded ${seoScore >= 80 ? 'bg-emerald-500' : seoScore >= 50 ? 'bg-amber-400' : 'bg-rose-500'}`}
-              style={{ width: `${seoScore}%` }}
-            />
-          </div>
-          <p className="text-sm text-slate-300">SEO completeness: {seoScore}/100</p>
+        <section className="panel">
+          <h3 className="panel-title">AI Coach</h3>
+          <Meter value={seoScore} label="SEO completeness" zoneClass={seoZone} />
+          <p className="panel-note num">SEO completeness: {seoScore}/100</p>
           {tips.length ? (
-            <ul className="list-disc space-y-1 pl-5 text-sm text-slate-300">
+            <ul className="tips">
               {tips.map((t) => (
                 <li key={t}>{t}</li>
               ))}
             </ul>
           ) : (
-            <p className="text-sm text-emerald-300">All checks passed.</p>
+            <p className="ok-text">All checks passed.</p>
           )}
-          <div className="flex items-center gap-3">
-            <button
-              onClick={() => copy(buildTitleSeoPrompt(episode, episodes))}
-              className={`${btnCls} bg-violet-500 text-white hover:bg-violet-400`}
-            >
+          <div className="row">
+            <button onClick={() => copy(buildTitleSeoPrompt(episode, episodes))} className="btn btn-primary">
+              <Icon name="copy" />
               Copy Title &amp; SEO Prompt
             </button>
             {msg && (
-              <span role="status" className="text-sm text-slate-300">
+              <span role="status" className="msg">
                 {msg}
               </span>
             )}
@@ -268,6 +423,44 @@ function PackagingTab({ episode, episodes, onChange }) {
 
 const GAUGE_MAX = 900; // gauge ends at 15:00
 const gaugePct = (sec) => Math.min(100, (sec / GAUGE_MAX) * 100);
+
+// Three zones drawn to scale: under 8m, 8-10m, 10-15m+.
+const SEGMENTS = [
+  { id: 'under', name: '< 8m', from: 0, to: 480 },
+  { id: 'compact', name: '8–10m', from: 480, to: 600 },
+  { id: 'sweet', name: '10–15m+', from: 600, to: GAUGE_MAX },
+];
+
+function DurationBar({ total, zone }) {
+  return (
+    <div className="dbar">
+      <div className="dbar-track" role="img" aria-label={`Duration gauge: ${zone.label}`}>
+        {SEGMENTS.map((s) => {
+          const fill = Math.max(0, Math.min(1, (total - s.from) / (s.to - s.from))) * 100;
+          return (
+            <div key={s.id} className={`dbar-seg zone-${s.id}`} style={{ flex: `${s.to - s.from} 0 0` }}>
+              <div className="dbar-fill" style={{ width: `${fill}%` }} />
+            </div>
+          );
+        })}
+      </div>
+      <div className="dbar-needle" style={{ left: `${gaugePct(total)}%` }} aria-hidden="true" />
+      <div className="dbar-labels" aria-hidden="true">
+        {SEGMENTS.map((s) => (
+          <span
+            key={s.id}
+            className={`dbar-label zone-${s.id}${zone.id === s.id ? ' is-active' : ''}`}
+            style={{ flex: `${s.to - s.from} 0 0` }}
+          >
+            <span className="dbar-name">{s.name}</span>
+            <span className="num">{formatTime(s.from)}</span>
+          </span>
+        ))}
+        <span className="dbar-end num">{formatTime(GAUGE_MAX)}</span>
+      </div>
+    </div>
+  );
+}
 
 function ScriptTab({ episode, episodes, onChange, onTeleprompter }) {
   const { duration, zone, monotony } = useMemo(() => analyzeEpisode(episode), [episode]);
@@ -302,88 +495,105 @@ function ScriptTab({ episode, episodes, onChange, onTeleprompter }) {
   const removeRegister = (id) => onChange({ ...episode, registers: episode.registers.filter((r) => r.id !== id) });
 
   return (
-    <div className="space-y-6">
-      <section className="space-y-3 rounded-lg border border-slate-800 bg-slate-900 p-5">
-        <div className="flex flex-wrap items-baseline justify-between gap-2">
-          <h3 className="text-lg font-semibold text-slate-100">
-            {formatTime(duration.totalSeconds)} <span className="text-sm font-normal text-slate-400">estimated</span>
+    <div className="col" style={{ gap: '1.5rem' }}>
+      <section className={`panel ${ZONE_BAR[zone.id]}`}>
+        <div className="console-top">
+          <h3 className="panel-title">
+            <span className="console-time num">{formatTime(duration.totalSeconds)}</span>
+            <span className="console-sub">estimated</span>
           </h3>
-          <span className="text-sm text-slate-300">
-            Core {formatTime(duration.coreSeconds)} · Expansion {formatTime(duration.expansionSeconds)}
-          </span>
+          <dl className="console-split">
+            <div>
+              <dt>Core</dt>
+              <dd className="num">{formatTime(duration.coreSeconds)}</dd>
+            </div>
+            <div>
+              <dt>Expansion</dt>
+              <dd className="num">{formatTime(duration.expansionSeconds)}</dd>
+            </div>
+          </dl>
         </div>
-        <div className="relative h-4 rounded bg-slate-800" role="img" aria-label={`Duration gauge: ${zone.label}`}>
-          <div className={`h-full rounded ${ZONE_BAR[zone.id]}`} style={{ width: `${gaugePct(duration.totalSeconds)}%` }} />
-          {[480, 600].map((m) => (
-            <div key={m} className="absolute top-0 h-full w-px bg-white/70" style={{ left: `${gaugePct(m)}%` }} />
+
+        <DurationBar total={duration.totalSeconds} zone={zone} />
+        <p className="zone-label">{zone.label}</p>
+
+        <ul className="pill-row" aria-label="Vocal registers in this episode">
+          {episode.registers.map((r) => (
+            <li key={r.id} className={`pill tone-${toneOf(episode.registers, r.id)}`}>
+              {r.name}
+              <span className="num">{r.wpm} WPM</span>
+            </li>
           ))}
-        </div>
-        <div className="relative h-4 text-xs text-slate-500">
-          <span className="absolute left-0">0:00</span>
-          <span className="absolute -translate-x-1/2" style={{ left: `${gaugePct(480)}%` }}>8:00</span>
-          <span className="absolute -translate-x-1/2" style={{ left: `${gaugePct(600)}%` }}>10:00</span>
-          <span className="absolute right-0">15:00</span>
-        </div>
-        <p className="text-sm font-semibold text-slate-200">{zone.label}</p>
+        </ul>
 
         {monotony.length ? (
-          <ul className="space-y-1 rounded border border-amber-600 bg-amber-500/10 p-3 text-sm text-amber-200" aria-label="Static-visual warnings">
+          <ul className="alert-warn" aria-label="Static-visual warnings">
             {monotony.map((w) => (
               <li key={w.startBlockId + w.endBlockId}>
-                Static stretch of {formatTime(w.seconds)} from {nameOf(w.startBlockId)} to {nameOf(w.endBlockId)}. Add a
-                register switch, [RE-HOOK], [SFX] or [PROXIMITY] cue.
+                <Icon name="warn" />
+                <span>
+                  Static stretch of <span className="num">{formatTime(w.seconds)}</span> from {nameOf(w.startBlockId)} to{' '}
+                  {nameOf(w.endBlockId)}. Add a register switch, [RE-HOOK], [SFX] or [PROXIMITY] cue.
+                </span>
               </li>
             ))}
           </ul>
         ) : (
-          <p className="text-sm text-emerald-300">No static-visual stretches over 2:30.</p>
+          <p className="ok-text">No static-visual stretches over 2:30.</p>
         )}
 
-        <div className="flex flex-wrap items-center gap-2">
-          <button onClick={() => copy(buildScriptCoachPrompt(episode, episodes))} className={`${btnCls} bg-violet-500 text-white hover:bg-violet-400`}>
+        <div className="row">
+          <button onClick={onTeleprompter} className="btn btn-primary">
+            <Icon name="mic" />
+            Start Studio Teleprompter
+          </button>
+          <button onClick={() => copy(buildScriptCoachPrompt(episode, episodes))} className="btn">
+            <Icon name="copy" />
             Copy Script Coach Prompt
           </button>
           <button
             onClick={() => download(`${slug(episode.title)}-recording-script.txt`, formatRecordingScript(episode), 'text/plain')}
-            className={`${btnCls} bg-slate-800 text-slate-200`}
+            className="btn btn-ghost"
           >
+            <Icon name="download" />
             Export Clean Recording Script
           </button>
-          <button onClick={onTeleprompter} className={`${btnCls} bg-fuchsia-500 text-black hover:bg-fuchsia-400`}>
-            Start Studio Teleprompter
-          </button>
           {msg && (
-            <span role="status" className="text-sm text-slate-300">
+            <span role="status" className="msg">
               {msg}
             </span>
           )}
         </div>
       </section>
 
-      <section className="space-y-3 rounded-lg border border-slate-800 bg-slate-900 p-5">
-        <h3 className="text-lg font-semibold text-slate-100">Vocal Registers</h3>
-        <ul className="space-y-2">
+      <section className="panel">
+        <h3 className="panel-title">Vocal Registers</h3>
+        <ul className="reg-list">
           {episode.registers.map((r) => {
             const used = episode.blocks.some((b) => b.registerId === r.id);
             const locked = used || episode.registers.length === 1;
             return (
-              <li key={r.id} className="flex flex-wrap items-center gap-2">
-                <input aria-label="Register name" className={`${inputCls} max-w-xs`} value={r.name} onChange={(e) => setRegister(r.id, { name: e.target.value })} />
-                <input
-                  aria-label="Words per minute"
-                  type="number"
-                  min="1"
-                  max="300"
-                  className={`${inputCls} w-24`}
-                  value={r.wpm || ''}
-                  onChange={(e) => setRegister(r.id, { wpm: Number(e.target.value) || 0 })}
-                />
-                <span className="text-sm text-slate-400">WPM</span>
+              <li key={r.id} className={`reg-row tone-${toneOf(episode.registers, r.id)}`}>
+                <span className="reg-swatch" aria-hidden="true" />
+                <input aria-label="Register name" className="input reg-name" value={r.name} onChange={(e) => setRegister(r.id, { name: e.target.value })} />
+                <span className="reg-wpm">
+                  <input
+                    aria-label="Words per minute"
+                    type="number"
+                    min="1"
+                    max="300"
+                    className="input"
+                    value={r.wpm || ''}
+                    onChange={(e) => setRegister(r.id, { wpm: Number(e.target.value) || 0 })}
+                  />
+                  WPM
+                </span>
                 <button
                   onClick={() => removeRegister(r.id)}
                   disabled={locked}
                   title={locked ? 'In use by a block, or the only register left' : 'Delete register'}
-                  className={`${btnCls} bg-slate-800 text-rose-300`}
+                  aria-label={`Delete register ${r.name}`}
+                  className="btn"
                 >
                   Delete
                 </button>
@@ -391,23 +601,26 @@ function ScriptTab({ episode, episodes, onChange, onTeleprompter }) {
             );
           })}
         </ul>
-        <button onClick={addRegister} className={`${btnCls} bg-slate-800 text-slate-200`}>
-          Add register
-        </button>
+        <div>
+          <button onClick={addRegister} className="btn">
+            <Icon name="plus" />
+            Add register
+          </button>
+        </div>
       </section>
 
-      <p className="text-sm text-slate-400">
+      <p className="panel-note">
         Inline tags: [PAUSE 3s], [SFX: rain], [PROXIMITY], [RE-HOOK]. They add time to the estimate and break up static stretches.
       </p>
 
       {ACTS.map((act) => (
-        <section key={act.id} className="space-y-3">
-          <div className="flex flex-wrap items-baseline justify-between gap-2">
-            <h3 className="text-lg font-semibold text-slate-100">
+        <section key={act.id} className="act">
+          <div className="act-head">
+            <h3 className="act-title">
               {act.title}
-              {act.timeHint && <span className="ml-2 text-sm font-normal text-slate-500">{act.timeHint}</span>}
+              {act.timeHint && <span className="act-hint num">{act.timeHint}</span>}
             </h3>
-            <span className="font-mono text-sm text-slate-400">{formatTime(duration.perAct[act.id] ?? 0)}</span>
+            <span className="act-time num">{formatTime(duration.perAct[act.id] ?? 0)}</span>
           </div>
 
           {episode.blocks
@@ -415,19 +628,19 @@ function ScriptTab({ episode, episodes, onChange, onTeleprompter }) {
             .map((b) => (
               <div
                 key={b.id}
-                className={`space-y-2 rounded-md border bg-slate-900 p-3 ${flagged.has(b.id) ? 'border-amber-500' : 'border-slate-800'}`}
+                className={`block-card tone-${toneOf(episode.registers, b.registerId)}${flagged.has(b.id) ? ' is-flagged' : ''}`}
               >
-                <div className="flex flex-wrap items-center gap-2">
+                <div className="block-bar">
                   <input
                     aria-label="Block label"
                     placeholder="Block label"
-                    className={`${inputCls} max-w-[12rem]`}
+                    className="input block-label"
                     value={b.label}
                     onChange={(e) => setBlock(b.id, { label: e.target.value })}
                   />
                   <select
                     aria-label="Vocal register"
-                    className={`${inputCls} max-w-[14rem]`}
+                    className="input block-register"
                     value={b.registerId}
                     onChange={(e) => setBlock(b.id, { registerId: e.target.value })}
                   >
@@ -438,41 +651,44 @@ function ScriptTab({ episode, episodes, onChange, onTeleprompter }) {
                       </option>
                     ))}
                   </select>
-                  <div role="group" aria-label="Zone" className="flex overflow-hidden rounded border border-slate-700 text-sm">
+                  <div role="group" aria-label="Zone" className="seg">
                     {[
                       [ZONES.CORE, 'Core'],
                       [ZONES.EXPANSION, 'Expansion'],
                     ].map(([z, label]) => (
-                      <button
-                        key={z}
-                        aria-pressed={b.zone === z}
-                        onClick={() => setBlock(b.id, { zone: z })}
-                        className={`px-3 py-2 ${b.zone === z ? 'bg-violet-500 text-white' : 'bg-slate-950 text-slate-400'}`}
-                      >
+                      <button key={z} aria-pressed={b.zone === z} onClick={() => setBlock(b.id, { zone: z })}>
                         {label}
                       </button>
                     ))}
                   </div>
-                  <span className="font-mono text-sm text-slate-400">{formatTime(duration.perBlock[b.id] ?? 0)}</span>
-                  <button onClick={() => removeBlock(b)} className={`${btnCls} ml-auto bg-slate-800 text-rose-300`}>
+                  <span className="block-time num">{formatTime(duration.perBlock[b.id] ?? 0)}</span>
+                  {flagged.has(b.id) && (
+                    <span className="flag">
+                      <Icon name="warn" size={12} />
+                      Static stretch
+                    </span>
+                  )}
+                  <button onClick={() => removeBlock(b)} className="btn spacer">
                     Delete block
                   </button>
                 </div>
                 <textarea
                   aria-label="Script text"
                   rows={5}
-                  className={inputCls}
+                  className="input"
                   value={b.text}
                   onChange={(e) => setBlock(b.id, { text: e.target.value })}
                 />
               </div>
             ))}
 
-          <div className="flex gap-2">
-            <button onClick={() => addBlock(act.id, ZONES.CORE)} className={`${btnCls} bg-slate-800 text-slate-200`}>
+          <div className="row">
+            <button onClick={() => addBlock(act.id, ZONES.CORE)} className="btn">
+              <Icon name="plus" />
               Add core block
             </button>
-            <button onClick={() => addBlock(act.id, ZONES.EXPANSION)} className={`${btnCls} bg-slate-800 text-slate-200`}>
+            <button onClick={() => addBlock(act.id, ZONES.EXPANSION)} className="btn">
+              <Icon name="plus" />
               Add expansion slot
             </button>
           </div>
@@ -551,10 +767,10 @@ export default function App() {
     }
   };
 
-  if (!episodes) return <p className="p-8 text-slate-400">Loading…</p>;
+  if (!episodes) return <p className="loading">Loading…</p>;
 
   return (
-    <div className="flex min-h-screen flex-col bg-slate-950 text-slate-100 md:flex-row">
+    <div className="shell">
       <LibrarySidebar
         episodes={episodes}
         selectedId={selectedId}
@@ -568,35 +784,36 @@ export default function App() {
         onImportFile={onImportFile}
       />
 
-      <main className="flex-1 space-y-6 p-6">
+      <main className="main">
         {episode ? (
           <>
-            <div role="tablist" aria-label="Episode sections" className="flex flex-wrap gap-2 border-b border-slate-800 pb-3">
-              {TABS.map(([id, label]) => (
-                <button
-                  key={id}
-                  role="tab"
-                  aria-selected={tab === id}
-                  onClick={() => setTab(id)}
-                  className={`${btnCls} ${tab === id ? 'bg-violet-500 text-white' : 'bg-slate-900 text-slate-300 hover:bg-slate-800'}`}
-                >
-                  {label}
-                </button>
-              ))}
+            <div className="workbar">
+              <EpisodeHeader episode={episode} />
+              <div role="tablist" aria-label="Episode sections" className="tabs">
+                {TABS.map(([id, label]) => (
+                  <button key={id} role="tab" aria-selected={tab === id} onClick={() => setTab(id)} className="tab">
+                    {label}
+                  </button>
+                ))}
+              </div>
             </div>
 
-            {tab === 'packaging' && <PackagingTab episode={episode} episodes={episodes} onChange={commit} />}
-            {tab === 'script' && (
-              <ScriptTab episode={episode} episodes={episodes} onChange={commit} onTeleprompter={() => setTeleOpen(true)} />
-            )}
-            {tab === 'analytics' && <AnalyticsPanel episode={episode} episodes={episodes} onChange={commit} />}
+            <div role="tabpanel" className="stage">
+              {tab === 'packaging' && <PackagingTab episode={episode} episodes={episodes} onChange={commit} />}
+              {tab === 'script' && (
+                <ScriptTab episode={episode} episodes={episodes} onChange={commit} onTeleprompter={() => setTeleOpen(true)} />
+              )}
+              {tab === 'analytics' && <AnalyticsPanel episode={episode} episodes={episodes} onChange={commit} />}
+            </div>
 
             {teleOpen && <TeleprompterModal episode={episode} onChange={commit} onClose={() => setTeleOpen(false)} />}
           </>
         ) : (
-          <div className="mt-20 text-center text-slate-400">
-            <p className="mb-4">No episodes yet.</p>
-            <button onClick={() => add(createEpisode())} className={`${btnCls} bg-violet-500 text-white hover:bg-violet-400`}>
+          <div className="empty">
+            <strong>No episodes yet.</strong>
+            <span>Create an episode to start timing a script.</span>
+            <button onClick={() => add(createEpisode())} className="btn btn-primary">
+              <Icon name="plus" />
               New episode
             </button>
           </div>
